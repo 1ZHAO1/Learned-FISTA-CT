@@ -10,7 +10,6 @@ from os.path import dirname, join as pjoin
 from collections import OrderedDict
 import time
 import numpy as np
-from helpers import test_rescale, show_image_matrix
 #from torch.utils.tensorboard import SummaryWriter
 import os
 
