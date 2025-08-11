@@ -12,7 +12,13 @@ import time
 import numpy as np
 #from torch.utils.tensorboard import SummaryWriter
 import os
-
+import torch
+from os.path import join as pjoin
+import os
+import numpy as np
+from skimage.metrics import peak_signal_noise_ratio as psnr
+from skimage.metrics import structural_similarity as ssim
+import matplotlib.pyplot as plt
 # [KEPT] - Loss functions remain unchanged.
 def l1_loss(pred, target, l1_weight):
     """
@@ -171,3 +177,87 @@ class Solver(object):
             if epoch % 1 == 0:
                 self.save_model(epoch)
                 np.save(pjoin(self.save_path, 'loss_{}_epoch.npy'.format(epoch)), np.array(train_losses))    
+
+
+    def test(self):
+        """
+        对整个测试集进行完整的评估，并保存结果。
+        """
+        # 1. 加载最佳模型
+        try:
+            # self.test_epoch 由 --test_epoch 命令行参数设置
+            self.load_model(self.test_epoch)
+            print(f"从 epoch {self.test_epoch} 加载模型成功。")
+        except Exception as e:
+            print(f"从 epoch {self.test_epoch} 加载模型时出错: {e}")
+            return
+
+        self.model.eval()  # 设置为评估模式
+
+        # 准备一个文件夹来保存可视化结果
+        vis_path = pjoin(self.save_path, 'test_visualizations')
+        os.makedirs(vis_path, exist_ok=True)
+        
+        # 用于存储所有样本分数的列表
+        all_psnr_scores = []
+        all_ssim_scores = []
+        
+        # 使用 torch.no_grad() 来节约显存并加速
+        with torch.no_grad():
+            # 遍历测试数据加载器
+            for i, data_batch in enumerate(self.data_loader):
+                
+                # 从数据加载器获取数据
+                x_fbp = data_batch['fbp'].to(self.device)
+                y_sino = data_batch['sino'].to(self.device)
+                gt_image_batch = data_batch['gt'] # GT（真实图像）保留在CPU上，格式为Numpy，方便计算
+
+                # 模型进行前向传播（重建）
+                # 注意：模型的输出是 PyTorch Tensor，在GPU上
+                reconstructed_batch, _, _ = self.model(x_fbp, y_sino)
+
+                # 将重建结果和输入FBP图从GPU转到CPU，并转为Numpy数组
+                reconstructed_batch_np = reconstructed_batch.cpu().numpy()
+                x_fbp_np = x_fbp.cpu().numpy()
+                
+                # 对一个batch里的每张图片进行评估
+                for j in range(reconstructed_batch_np.shape[0]):
+                    gt_img = gt_image_batch[j].squeeze()
+                    recon_img = reconstructed_batch_np[j].squeeze()
+
+                    # 计算 PSNR 和 SSIM
+                    current_psnr = psnr(gt_img, recon_img, data_range=gt_img.max() - gt_img.min())
+                    current_ssim = ssim(gt_img, recon_img, data_range=gt_img.max() - gt_img.min())
+                    
+                    all_psnr_scores.append(current_psnr)
+                    all_ssim_scores.append(current_ssim)
+
+                    # 只保存前5个batch的可视化结果，避免文件过多
+                    if i < 5:
+                        fbp_img = x_fbp_np[j].squeeze()
+                        fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+                        
+                        axes[0].imshow(gt_img, cmap='gray')
+                        axes[0].set_title('Ground Truth (真实图像)')
+                        axes[0].axis('off')
+                        
+                        axes[1].imshow(fbp_img, cmap='gray')
+                        axes[1].set_title('FBP (输入)')
+                        axes[1].axis('off')
+                        
+                        axes[2].imshow(recon_img, cmap='gray')
+                        axes[2].set_title(f'Model Output (模型输出)\nPSNR: {current_psnr:.2f} dB, SSIM: {current_ssim:.4f}')
+                        axes[2].axis('off')
+
+                        plt.savefig(pjoin(vis_path, f'comparison_batch_{i}_img_{j}.png'))
+                        plt.close(fig)
+
+        # 计算并打印平均分
+        avg_psnr = np.mean(all_psnr_scores)
+        avg_ssim = np.mean(all_ssim_scores)
+        
+        print("\n--- 评估完成 ---")
+        print(f"在 {len(all_psnr_scores)} 张测试图像上进行了评估。")
+        print(f"平均峰值信噪比 (Average PSNR): {avg_psnr:.2f} dB")
+        print(f"平均结构相似性 (Average SSIM): {avg_ssim:.4f}")
+        print("---------------------------\n")
